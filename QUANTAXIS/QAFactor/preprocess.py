@@ -14,8 +14,10 @@ from typing import List, Tuple, Union
 import jqdatasdk
 import numpy as np
 import pandas as pd
+import math
 
 import statsmodels.api as sm
+from statsmodels.stats.stattools import medcouple
 from QUANTAXIS.QAAnalysis.QAAnalysis_block import QAAnalysis_block
 from QUANTAXIS.QAFactor.utils import QA_fmt_code_list
 
@@ -25,21 +27,8 @@ def QA_fmt_factor(factor: Union[pd.Series, pd.DataFrame]):
     将 factor 格式化
     """
     # 索引设置
-    if isinstance(factor, pd.DataFrame):
-        factor = factor.stack(dropna=False)
-    level_0 = 'datetime'
-    try:
-        pd.Timestamp(factor.index.levels[0][0])
-    except:
-        try:
-            level_0 = 'code'
-            pd.Timestamp(factor.index.levels[1][0])
-        except:
-            raise ValueError("错误，索引格式不正确")
-    if level_0 == 'code':
-        factor = factor.swaplevel()
-    factor.index.names = ["datetime", "code"]
-    factor.index = factor.index.map(lambda x: (pd.Timestamp(x[0]), x[1]))
+    factor = factor.set_index(["datetime", "code"])
+    factor.columns = ["factor"]
     return factor.sort_index()
 
 
@@ -48,7 +37,7 @@ def QA_winsorize_factor(
                       pd.DataFrame],
         grouper: list = ["datetime"],
         extreme_scale: float = 1.4826,
-        extreme_method: str = "mad",
+        extreme_method: str = "boxplot",
         extreme_inclusive: bool = False,
         quant: list = None,
         inf2nan: bool = True,
@@ -70,13 +59,15 @@ def QA_winsorize_factor(
         diff = (x - x.median()).apply(abs)
         mad = diff.median()
         upper_limit = x.median() + scale * mad
+        upper_limit = upper_limit[0]
         lower_limit = x.median() - scale * mad
+        lower_limit = lower_limit[0]
         if inclusive:
             x.loc[x < lower_limit] = lower_limit
             x.loc[x > upper_limit] = upper_limit
             x.clip(lower_limit, upper_limit, inplace=True)
         else:
-            x = x.loc[(x >= lower_limit) & (x <= upper_limit)]
+            x = x.loc[(x["factor"] >= lower_limit) & (x["factor"] <= upper_limit)]
         if nan2mean:
             return x.fillna(np.nanmean(x))
         return x
@@ -107,8 +98,31 @@ def QA_winsorize_factor(
             return x.fillna(np.nanmean(x))
         else:
             return x
+    def _boxplot_cut(x, quant, inclusive, nan2mean):
+        mc = medcouple(x.to_numpy())  # MedCouple方法中的mc
+        q_25 = x.quantile(0.25)
+        q_75 = x.quantile(0.75)
+        iqr = q_75 - q_25
+        if mc >= 0:
+            lower_limit = q_25 - 1.5 * math.exp(-3.5 * mc) * iqr
+            upper_limit = q_75 + 1.5 * math.exp(4 * mc) * iqr
+        else:
+            lower_limit = q_25 - 1.5 * math.exp(-4 * mc) * iqr
+            upper_limit = q_75 + 1.5 * math.exp(3.5 * mc) * iqr
+        lower_limit = lower_limit[0]
+        upper_limit = upper_limit[0]
+        if inclusive:
+            x.loc[x < lower_limit] = lower_limit
+            x.loc[x > upper_limit] = upper_limit
+            x.clip(lower_limit, upper_limit, inplace=True)
+        else:
+            x = x.loc[(x["factor"] >= lower_limit) & (x["factor"] <= upper_limit)]
+        if nan2mean:
+            return x.fillna(np.nanmean(x))
+        else:
+            return x
 
-    if extreme_method not in ["mad", "std", "quant"]:
+    if extreme_method not in ["mad", "std", "quant", "boxplot"]:
         raise ValueError("参数为 mad/std/quant, 仅支持这极值处理方式")
     # 对因子进行格式化
     factor = QA_fmt_factor(factor)
@@ -147,6 +161,15 @@ def QA_winsorize_factor(
                                         quant,
                                         extreme_inclusive,
                                         nan2mean)).droplevel(level=1)
+        )
+        return factor
+    elif extreme_method is "boxplot":
+        factor = (
+            factor.groupby(grouper)
+                .apply(lambda x: _boxplot_cut(x,
+                                            quant,
+                                            extreme_inclusive,
+                                            nan2mean)).droplevel(level=1)
         )
         return factor
 
